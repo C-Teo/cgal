@@ -24,6 +24,7 @@ typedef CGAL::Exact_predicates_exact_constructions_kernel K;
 typedef CGAL::Polygon_2<K> Polygon;
 typedef CGAL::Point_2<K> Point;
 typedef K::Segment_2 Segment;
+typedef CGAL::Aff_transformation_2<K> Transformation;
 
 int main() {
   // create a polygon and put some points in it
@@ -44,32 +45,58 @@ int main() {
 
   // create our agent position
   Point q(5, 3.5);
+  // Point q(5, 2);
 
   // create a line segment to cut through the polygon and q (horizontal sweep line)
   Segment cut_seg(Point(-2, q.y()), Point(12, q.y()));
 
+  // Rotate p around q until no vertex lies on cut_seg
+  bool has_vertex_on_cut = false;
+
+  for(auto vit = p.vertices_begin(); vit != p.vertices_end(); ++vit) {
+    if(cut_seg.has_on(*vit)) {
+      has_vertex_on_cut = true;
+      break;
+    }
+  }
+
+  if(has_vertex_on_cut) {
+    // Apply a small rotation around q: sin=1/1000, cos=1000/1000
+    // | cos θ   -sin θ |     | c/hw   -s/hw |
+    // | sin θ    cos θ |  =  | s/hw    c/hw |
+
+    Transformation to_origin(CGAL::TRANSLATION, K::Vector_2(-q.x(), -q.y()));
+    Transformation rotation(CGAL::ROTATION, 1, 1000, 1000);
+    Transformation from_origin(CGAL::TRANSLATION, K::Vector_2(q.x(), q.y()));
+    Transformation transform = from_origin * rotation * to_origin;
+    p = CGAL::transform(transform, p);
+  }
+
+  for(auto vit = p.vertices_begin(); vit != p.vertices_end(); ++vit) {
+    std::cout << "Vertex: " << *vit << std::endl;
+  }
+
   // loop through all edges in the polygon
   // - extract the geometric segment and return the intersection if it exists
-  for (auto eit = p.edges_begin(); eit != p.edges_end(); ++eit) {
+  for(auto eit = p.edges_begin(); eit != p.edges_end(); ++eit) {
     const Segment& edge_seg = *eit;
 
-    std::cout << "Edge from "
-          << edge_seg.source()
-          << " to "
-          << edge_seg.target()
-          << std::endl;
+    std::cout << "Edge from " << edge_seg.source() << " to " << edge_seg.target() << std::endl;
 
     auto result = CGAL::intersection(edge_seg, cut_seg);
 
-    if (result.has_value()) {
+    if(result.has_value()) {
       // assume no segment overlap
-      if (const Point* p = std::get_if<Point>(&*result)) {
+      if(const Point* p = std::get_if<Point>(&*result)) {
         std::cout << "Intersection point: " << *p << std::endl;
       }
     }
   }
 
-  CGAL::draw(p);
+  CGAL::Graphics_scene scene;
+  CGAL::add_to_graphics_scene(p, scene);
+  scene.add_segment(cut_seg.source(), cut_seg.target());
+  CGAL::draw_graphics_scene(scene, "K-Visibility Test");
 
   return EXIT_SUCCESS;
 }
