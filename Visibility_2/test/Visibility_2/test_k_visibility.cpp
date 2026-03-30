@@ -26,6 +26,8 @@ typedef CGAL::Point_2<K> Point;
 typedef K::Segment_2 Segment;
 typedef CGAL::Aff_transformation_2<K> Transformation;
 
+bool DEBUGGING = true;
+
 int main() {
   // create a polygon and put some points in it
   Polygon p;
@@ -72,27 +74,62 @@ int main() {
     p = CGAL::transform(transform, p);
   }
 
-  for(auto vit = p.vertices_begin(); vit != p.vertices_end(); ++vit) {
-    std::cout << "Vertex: " << *vit << std::endl;
+  if(DEBUGGING) {
+    for(auto vit = p.vertices_begin(); vit != p.vertices_end(); ++vit) {
+      std::cout << "Vertex: " << *vit << std::endl;
+    }
   }
 
   // loop through all edges in the polygon
   // - extract the geometric segment and return the intersection if it exists
+  std::vector<Point> intersections;
+
   for(auto eit = p.edges_begin(); eit != p.edges_end(); ++eit) {
     const Segment& edge_seg = *eit;
 
-    std::cout << "Edge from " << edge_seg.source() << " to " << edge_seg.target() << std::endl;
+    if(DEBUGGING)
+      std::cout << "Edge from " << edge_seg.source() << " to " << edge_seg.target() << std::endl;
 
     auto result = CGAL::intersection(edge_seg, cut_seg);
 
     if(result.has_value()) {
       // assume no segment overlap
-      if(const Point* p = std::get_if<Point>(&*result)) {
-        std::cout << "Intersection point: " << *p << std::endl;
+      if(const Point* pt = std::get_if<Point>(&*result)) {
+        if(DEBUGGING)
+          std::cout << "Intersection point: " << *pt << std::endl;
+        intersections.push_back(*pt);
       }
     }
   }
 
+  // Find the leftmost intersection and move to the front WITHOUT changing order
+  if(!intersections.empty()) {
+    auto leftmost_it = std::min_element(intersections.begin(), intersections.end(),
+                                        [](const Point& a, const Point& b) { return a.x() < b.x(); });
+    std::rotate(intersections.begin(), leftmost_it, intersections.end());
+  }
+
+  // Compute min distance epsilon from any vertex to the line
+  double eps = std::numeric_limits<double>::max();
+  for(auto it = p.vertices_begin(); it != p.vertices_end(); ++it) {
+    // Compute strictly vertical distance
+    double dist = std::abs(CGAL::to_double(it->y()) - CGAL::to_double(q.y()));
+
+    if(dist < eps) {
+      eps = dist;
+    }
+  }
+
+  if(DEBUGGING)
+    std::cout << "Epsilon: " << eps << std::endl;
+
+  // Create edges (results in Polygon_A and Polygon_B)
+
+  // Convert Polygon_A and Polygon_B to Arrangement_2
+
+  // Utilize CGAL Arr_vertical_decomposition or Arr_trapezoid_ric_point_location
+
+  // Draw the scene for debugging purposes
   CGAL::Graphics_scene scene;
   CGAL::add_to_graphics_scene(p, scene);
   scene.add_segment(cut_seg.source(), cut_seg.target());
