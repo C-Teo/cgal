@@ -12,6 +12,13 @@
 //             Teodor Cirstoiu <tcirstoiu@torontomu.ca>
 //
 
+/*
+cmake -S . \
+-B build/release/ \
+-DCMAKE_BUILD_TYPE=Release \
+-DCGAL_DIR=~/projects/cgal
+*/
+
 #include <CGAL/Arr_walk_along_line_point_location.h>
 #include <CGAL/Exact_predicates_exact_constructions_kernel.h>
 #include <CGAL/Polygon_2.h>
@@ -25,6 +32,23 @@ typedef CGAL::Polygon_2<K> Polygon;
 typedef CGAL::Point_2<K> Point;
 typedef K::Segment_2 Segment;
 typedef CGAL::Aff_transformation_2<K> Transformation;
+typedef K::FT FT; // Used for CGAL exact rationals in geometric tests
+
+// Struct to simplify our depth tree
+struct LineIsect
+{
+  const Point& j_start;
+  const Point& j_end;
+  int depth;
+};
+
+void assign_depths(std::vector<LineIsect>& pairs);
+
+std::pair<Polygon, Polygon> build_pa_pb(const std::vector<LineIsect>& upper_pairs,
+                                        const std::vector<LineIsect>& lower_pairs,
+                                        const std::vector<Point>& intersections,
+                                        FT ell_y,
+                                        FT eps) {}
 
 bool DEBUGGING = true;
 
@@ -46,8 +70,7 @@ int main() {
   p.push_back(Point(10, 0));
 
   // create our agent position
-  Point q(5, 3.5);
-  // Point q(5, 2);
+  Point q(5, 3.5); // Point q(5, 2);
 
   // create a line segment to cut through the polygon and q (horizontal sweep line)
   Segment cut_seg(Point(-2, q.y()), Point(12, q.y()));
@@ -110,14 +133,11 @@ int main() {
   }
 
   // Compute min distance epsilon from any vertex to the line
-  double eps = std::numeric_limits<double>::max();
+  FT eps = CGAL::abs(p.vertices_begin()->y() - q.y()); // initialize to first vertex
   for(auto it = p.vertices_begin(); it != p.vertices_end(); ++it) {
-    // Compute strictly vertical distance
-    double dist = std::abs(CGAL::to_double(it->y()) - CGAL::to_double(q.y()));
-
-    if(dist < eps) {
+    FT dist = CGAL::abs(it->y() - q.y()); // Compute strictly vertical distance
+    if(dist < eps)
       eps = dist;
-    }
   }
 
   if(DEBUGGING)
@@ -125,9 +145,61 @@ int main() {
 
   // Create edges (results in Polygon_A and Polygon_B)
 
+  // -- Sort by upper and lower pairs
+
+  // Between consecutive pairs (x2i−1,x2i) of the Jordan sequence, for i ∈{1,...,
+  // m/2}, the polygon boundary of P lies above . Similarly, between pairs (x2j,x2j+1),
+  // for j ∈{1,...,m/2−1}, and between (xm,x0), the boundary of P lies below .
+  int m = (int)intersections.size();
+
+  if(DEBUGGING)
+    std::cout << "Number of intersections: " << m << std::endl;
+
+  std::vector<LineIsect> upper_pairs;
+
+  for(int index = 1; index <= m / 2; ++index) {
+    const Point& x2i_1 = intersections[(2 * index - 1) - 1];
+    const Point& x2i = intersections[(2 * index) - 1];
+    upper_pairs.push_back({x2i_1, x2i});
+  }
+
+  std::vector<LineIsect> lower_pairs;
+
+  for(int index = 1; index <= m / 2 - 1; ++index) {
+    const Point& x2j = intersections[(2 * index) - 1];
+    const Point& x2j_1 = intersections[(2 * index + 1) - 1];
+    lower_pairs.push_back({x2j, x2j_1});
+  }
+
+  lower_pairs.push_back({intersections.back(), intersections.front()});
+
+  // -- Create tree of all depths and then sort
+  assign_depths(upper_pairs);
+  assign_depths(lower_pairs);
+
+  if(DEBUGGING) {
+    std::cout << "Upper pairs:" << std::endl;
+    for(const auto& pair : upper_pairs) {
+      std::cout << "  (" << pair.j_start << ", " << pair.j_end << ")" << ", " << pair.depth << std::endl;
+    }
+
+    std::cout << "Lower pairs:" << std::endl;
+    for(const auto& pair : lower_pairs) {
+      std::cout << "  (" << pair.j_start << ", " << pair.j_end << ")" << ", " << pair.depth << std::endl;
+    }
+  }
+
+  // -- Create new three-way edges
+
+  // -- Append top/bottom points with its respective cut edges
+
   // Convert Polygon_A and Polygon_B to Arrangement_2
 
+  // Lemma2 Theradial decomposition of a simple n-vertex polygon P around
+  // a query point q can be computed in Θ(n)time.
   // Utilize CGAL Arr_vertical_decomposition or Arr_trapezoid_ric_point_location
+
+  // Start the algorithm...
 
   // Draw the scene for debugging purposes
   CGAL::Graphics_scene scene;
@@ -137,3 +209,58 @@ int main() {
 
   return EXIT_SUCCESS;
 }
+
+// Note: partially overlapping intervals can never appear in a valid simple polygon
+void assign_depths(std::vector<LineIsect>& arcs) {
+  if(arcs.empty())
+    return;
+
+  struct Iv
+  {
+    double lo, hi;
+    int index;
+  };
+
+  std::vector<Iv> intervals;
+  intervals.reserve(arcs.size());
+
+  for(int i = 0; i < (int)arcs.size(); ++i) {
+    double xa = CGAL::to_double(arcs[i].j_start.x());
+    double xb = CGAL::to_double(arcs[i].j_end.x());
+    intervals.push_back({std::min(xa, xb), std::max(xa, xb), i});
+  }
+
+  // Sort by lo ascending, and if tie, by hi descending
+  std::sort(intervals.begin(), intervals.end(), [](const Iv& a, const Iv& b) {
+    if(a.lo != b.lo)
+      return a.lo < b.lo;
+    return a.hi > b.hi;
+  });
+
+  // After sorting, check no two intervals partially overlap
+  for(int i = 1; i < (int)intervals.size(); ++i) {
+    // valid cases: disjoint (prev.hi <= cur.lo) or nested (prev.hi >= cur.hi)
+    assert(intervals[i - 1].hi <= intervals[i].lo ||
+           intervals[i - 1].hi >= intervals[i].hi && "Partially overlapping intervals — polygon may not be simple");
+  }
+
+  // Stack tracks the hi endpoints of every interval that is still "open"
+  std::stack<double> active;
+
+  for(const Iv& iv : intervals) {
+    while(!active.empty() && active.top() <= iv.lo) {
+      //  By the nested parenthesis property, any future interval must also start after it ended (since intervals are
+      //  processed left to right and the future one's lo is even larger).
+      active.pop();
+    }
+
+    arcs[iv.index].depth = (int)active.size() + 1;
+    active.push(iv.hi);
+  }
+}
+
+std::pair<Polygon, Polygon> build_pa_pb(const std::vector<LineIsect>& upper_pairs,
+                                        const std::vector<LineIsect>& lower_pairs,
+                                        const std::vector<Point>& intersections,
+                                        FT ell_y,
+                                        FT eps) {}
