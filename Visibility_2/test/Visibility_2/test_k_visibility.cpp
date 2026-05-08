@@ -23,16 +23,31 @@ cmake -S . \
 #include <CGAL/Exact_predicates_exact_constructions_kernel.h>
 #include <CGAL/Polygon_2.h>
 #include <CGAL/Arr_segment_traits_2.h>
+#include <CGAL/Arrangement_2.h>
 #include <CGAL/Segment_2.h>
 #include <CGAL/draw_polygon_2.h>
+#include <CGAL/draw_arrangement_2.h>
 #include <CGAL/Arr_naive_point_location.h>
+#include <CGAL/Arr_vertical_decomposition_2.h>
+
+#include <CGAL/Arr_overlay_2.h>
+#include <CGAL/Arr_default_overlay_traits.h>
 
 typedef CGAL::Exact_predicates_exact_constructions_kernel K;
 typedef CGAL::Polygon_2<K> Polygon;
 typedef CGAL::Point_2<K> Point;
 typedef K::Segment_2 Segment;
+typedef K::Line_2 Line;
 typedef CGAL::Aff_transformation_2<K> Transformation;
 typedef K::FT FT; // Used for CGAL exact rationals in geometric tests
+typedef CGAL::Arr_segment_traits_2<K> Traits;
+typedef CGAL::Arrangement_2<Traits> Arrangement;
+
+// This is what "Vert_decomp_list" actually is:
+typedef Arrangement::Vertex_const_handle Vertex_handle;
+typedef std::pair<CGAL::Object, CGAL::Object> Feature_pair;
+typedef std::pair<Vertex_handle, Feature_pair> Decomp_result;
+typedef std::vector<Decomp_result> Decomp_list;
 
 // Struct to simplify our depth tree
 struct LineIsect
@@ -46,9 +61,13 @@ void assign_depths(std::vector<LineIsect>& pairs);
 
 std::pair<Polygon, Polygon> build_pa_pb(const std::vector<LineIsect>& upper_pairs,
                                         const std::vector<LineIsect>& lower_pairs,
-                                        const std::vector<Point>& intersections,
+                                        const Polygon& polygon,
                                         FT ell_y,
-                                        FT eps) {}
+                                        FT eps);
+
+void process(const CGAL::Object& obj, const Point& p_prime, Arrangement& master_arr, const Point& q, FT eps);
+void add_radial_to_master(
+    Arrangement& master_arr, const std::vector<Segment>& partition_edges, const Polygon& p, const Point& q, FT eps);
 
 bool DEBUGGING = true;
 
@@ -120,7 +139,8 @@ int main() {
       if(const Point* pt = std::get_if<Point>(&*result)) {
         if(DEBUGGING)
           std::cout << "Intersection point: " << *pt << std::endl;
-        intersections.push_back(*pt);
+        // intersections.push_back(*pt);
+        intersections.emplace_back(*pt);
       }
     }
   }
@@ -190,22 +210,53 @@ int main() {
   }
 
   // -- Create new three-way edges
+  auto [pa, pb] = build_pa_pb(upper_pairs, lower_pairs, p, q.y(), eps);
 
-  // -- Append top/bottom points with its respective cut edges
+  if(DEBUGGING) {
+    std::cout << "Pa vertices:" << std::endl;
+    for(auto vit = pa.vertices_begin(); vit != pa.vertices_end(); ++vit)
+      std::cout << "  " << *vit << std::endl;
+    std::cout << "Pb vertices:" << std::endl;
+    for(auto vit = pb.vertices_begin(); vit != pb.vertices_end(); ++vit)
+      std::cout << "  " << *vit << std::endl;
+  }
 
-  // Convert Polygon_A and Polygon_B to Arrangement_2
+  // Draw the scene for debugging purposes
+  CGAL::Graphics_scene scene1;
+  CGAL::Graphics_scene scene2;
+  CGAL::Graphics_scene scene3;
+  CGAL::Graphics_scene scene4;
+
+  CGAL::add_to_graphics_scene(p, scene1);
+  CGAL::add_to_graphics_scene(pa, scene2);
+  CGAL::add_to_graphics_scene(pb, scene3);
+
+  scene1.add_segment(cut_seg.source(), cut_seg.target());
+  scene2.add_segment(cut_seg.source(), cut_seg.target());
+  scene3.add_segment(cut_seg.source(), cut_seg.target());
+  scene4.add_segment(cut_seg.source(), cut_seg.target());
+
+  CGAL::draw_graphics_scene(scene1, "K-Visibility Test Scene1");
+  CGAL::draw_graphics_scene(scene2, "K-Visibility Test Scene2");
+  CGAL::draw_graphics_scene(scene3, "K-Visibility Test Scene3");
 
   // Lemma2 Theradial decomposition of a simple n-vertex polygon P around
   // a query point q can be computed in Θ(n)time.
-  // Utilize CGAL Arr_vertical_decomposition or Arr_trapezoid_ric_point_location
+  // Utilize CGAL::Arr_vertical_decomposition or CGAL::decompose
+  Arrangement master_arr;
+  for(auto it = p.edges_begin(); it != p.edges_end(); ++it) {
+    CGAL::insert(master_arr, *it);
+  }
 
-  // Start the algorithm...
+  add_radial_to_master(master_arr, std::vector<Segment>(pa.edges_begin(), pa.edges_end()), p, q, eps);
+  add_radial_to_master(master_arr, std::vector<Segment>(pb.edges_begin(), pb.edges_end()), p, q, -eps);
 
-  // Draw the scene for debugging purposes
-  CGAL::Graphics_scene scene;
-  CGAL::add_to_graphics_scene(p, scene);
-  scene.add_segment(cut_seg.source(), cut_seg.target());
-  CGAL::draw_graphics_scene(scene, "K-Visibility Test");
+  // Draw the arrangement for debugging purposes
+  CGAL::add_to_graphics_scene(master_arr, scene4);
+  CGAL::draw_graphics_scene(scene4, "K-Visibility Test Scene4");
+
+  // Start the algorithm
+  // . . .
 
   return EXIT_SUCCESS;
 }
@@ -261,6 +312,236 @@ void assign_depths(std::vector<LineIsect>& arcs) {
 
 std::pair<Polygon, Polygon> build_pa_pb(const std::vector<LineIsect>& upper_pairs,
                                         const std::vector<LineIsect>& lower_pairs,
-                                        const std::vector<Point>& intersections,
+                                        const Polygon& polygon,
                                         FT ell_y,
-                                        FT eps) {}
+                                        FT eps) {
+
+  std::vector<Point> pa_pts;
+  std::vector<Point> pb_pts;
+
+  // Add any optimizations like a hash_map of intersection points to pairs for O(1) lookup
+  // Keyed by x since all intersection points share y = ell_y
+  std::map<FT, const LineIsect*> upper_at;
+  for(const auto& pair : upper_pairs)
+    upper_at[pair.j_start.x()] = &pair;
+
+  std::map<FT, const LineIsect*> lower_at;
+  for(const auto& pair : lower_pairs)
+    lower_at[pair.j_start.x()] = &pair;
+
+  std::vector<Point> verts(polygon.vertices_begin(), polygon.vertices_end());
+  int n = (int)verts.size();
+
+  // Find a point below the line to start the walk for polygon_b
+  int start_b = 0;
+  for(int i = 0; i < n; ++i) {
+    if(verts[i].y() < ell_y) {
+      start_b = i;
+      break;
+    }
+  }
+
+  // Find a point above the line to start the walk for polygon_a
+  int start_a = 0;
+  for(int i = 0; i < n; ++i) {
+    if(verts[i].y() > ell_y) {
+      start_a = i;
+      break;
+    }
+  }
+
+  // For the point below (polygon_b) follow the order of the polygon and add vertices to pb_pts
+  // (as long as it is below the line)
+  for(int j = 0; j < n; ++j) {
+    int i = (start_b + j) % n;
+    int i_next = (start_b + j + 1) % n;
+    const Point& cur = verts[i];
+    const Point& nxt = verts[i_next];
+
+    if(cur.y() < ell_y)
+      pb_pts.push_back(cur);
+
+    // Check if moving to the next point hits an intersection
+    bool cur_above = cur.y() > ell_y;
+    bool nxt_above = nxt.y() > ell_y;
+    if(cur_above == nxt_above)
+      continue;
+
+    // Linear interpolation along edge, find when y(t) = ell_y and plug for x
+    FT t = (ell_y - cur.y()) / (nxt.y() - cur.y());
+    Point isect(cur.x() + t * (nxt.x() - cur.x()), ell_y);
+
+    if(!cur_above) {
+      // If we hit an intersection coming from below, use the upper_pair starting at that
+      // intersection to replace the boundary above l with the new three-edge path.
+      // Append: isect, (isect.x, ell_y + eps/(2*d)), (j_end.x, ell_y + eps/(2*d))
+      // Then continue following the polygon above the line until the next intersection.
+      auto it = upper_at.find(isect.x());
+      if(it != upper_at.end()) {
+        FT len = eps / pow(2, it->second->depth);
+        pb_pts.push_back(Point(isect.x(), ell_y + len));
+        pb_pts.push_back(Point(it->second->j_end.x(), ell_y + len));
+      }
+    }
+  }
+
+  // For the point above (polygon_a) follow the order of the polygon and add vertices to pa_pts
+  // (as long as it is above the line)
+  for(int j = 0; j < n; ++j) {
+    int i = (start_a + j) % n;
+    int i_next = (start_a + j + 1) % n;
+    const Point& cur = verts[i];
+    const Point& nxt = verts[i_next];
+
+    if(cur.y() > ell_y)
+      pa_pts.push_back(cur);
+
+    // Check if moving to the next point hits an intersection
+    bool cur_above = cur.y() > ell_y;
+    bool nxt_above = nxt.y() > ell_y;
+    if(cur_above == nxt_above)
+      continue;
+
+    // Linear interpolation along edge, find when y(t) = ell_y and plug for x
+    FT t = (ell_y - cur.y()) / (nxt.y() - cur.y());
+    Point isect(cur.x() + t * (nxt.x() - cur.x()), ell_y);
+
+    if(cur_above) {
+      // If we hit an intersection coming from above, use the lower_pair starting at that
+      // intersection to replace the boundary below l with the new three-edge path.
+      // Append: isect, (isect.x, ell_y - eps/(2*d)), (j_end.x, ell_y - eps/(2*d))
+      // Then continue following the polygon below the line until the next intersection.
+      auto it = lower_at.find(isect.x());
+      if(it != lower_at.end()) {
+        FT len = eps / pow(2, it->second->depth);
+        pa_pts.push_back(Point(isect.x(), ell_y - len));
+        pa_pts.push_back(Point(it->second->j_end.x(), ell_y - len));
+      }
+    }
+  }
+
+  return {Polygon(pa_pts.begin(), pa_pts.end()), Polygon(pb_pts.begin(), pb_pts.end())};
+}
+
+// FQ: Projective Transformation Mapping a Point to Infinity
+// https://www.youtube.com/watch?v=E-mLLId3uuY
+
+// In homogeneous coordinates we represent a point as [x, y, w]
+// To find the 2D Cartesian result we divide by the third component: (x/w, y/w)
+
+// First we translate point + epsilon so q is (0,0) (for the lower polygon all points are below the line)
+// Then we apply the projection matrix M which sends (0,1,0) to (0,0,1) (the point at infinity in the y direction)
+
+// M = | 1 0 0 |
+//     | 0 0 1 |
+//     | 0 1 0 |
+
+// Which is simplified to (x, y) -> (x/y, 1/y) in Cartesian coordinates
+Point fq(const Point& p, const Point& q, FT eps) {
+  // Translate
+  FT dx = p.x() - q.x();
+  FT dy = p.y() - q.y() + eps;
+
+  // Project
+  return Point(dx / dy, FT(1) / dy);
+}
+
+// To inverse we apply the inverse of the projection matrix M^-1 which sends (0,0,1) back to (0,1,0)
+// And then we translate back by -epsilon and the location of q
+// The inverse matrix M^-1 is the same as M since it is symmetric and involutory (M = M^-1)
+Point fq_inv(const Point& p_prime, const Point& q, FT eps) {
+  // Project
+  FT x = p_prime.x() / p_prime.y();
+  FT y = FT(1) / p_prime.y();
+
+  // Translate
+  return Point(x + q.x(), y + q.y() - eps);
+}
+
+void add_radial_to_master(
+    Arrangement& master_arr, const std::vector<Segment>& partition_edges, const Polygon& p, const Point& q, FT eps) {
+  Arrangement trans_arr;
+
+  for(const auto& e : partition_edges) {
+    Point src = fq(e.source(), q, eps);
+    Point tgt = fq(e.target(), q, eps);
+
+    CGAL::insert(trans_arr, Segment(src, tgt));
+  }
+
+  // 2. Perform vertical decomposition on the unrolled shape
+  Decomp_list vd_list;
+  CGAL::decompose(trans_arr, std::back_inserter(vd_list));
+
+  // 3. Process rays
+  for(const auto& entry : vd_list) {
+    // Each entry is:
+    // - Point p' where the ray from q hits the arrangement (in transformed space)
+    // - A pair of CGAL::Objects representing the feature hit above and below p'
+    Point p_prime = entry.first->point();
+
+    if(eps > 0) {
+      // We only care about edge down for polygon with positive epsilon
+      process(entry.second.first, p_prime, master_arr, q, eps);
+    } else {
+      // We only care about edge up for polygon with negative epsilon
+      process(entry.second.second, p_prime, master_arr, q, eps);
+    }
+  }
+}
+
+void process(const CGAL::Object& obj, const Point& p_prime, Arrangement& master_arr, const Point& q, FT eps) {
+  Point intersect_prime;
+
+  Arrangement::Halfedge_const_handle he;
+  Arrangement::Vertex_const_handle vh;
+
+  if(CGAL::assign(vh, obj)) { // Ray hits a vertex
+
+    intersect_prime = vh->point();
+
+  } else if(CGAL::assign(he, obj)) { // Ray hits a edge
+    Point s = he->curve().source();
+    Point t = he->curve().target();
+
+    FT u = p_prime.x();
+
+    // Linear interpolation for the y-coordinate
+    FT y_int = s.y() + (t.y() - s.y()) * (u - s.x()) / (t.x() - s.x());
+
+    intersect_prime = Point(u, y_int);
+  } else { // Ray hit nothing
+    return;
+  }
+
+  CGAL::insert(master_arr, Segment(q, fq_inv(intersect_prime, q, eps)));
+}
+
+/*
+
+// 1. compute ell_y and eps
+FT ell_y = q.y();
+FT eps = ...;
+
+// 2. compute jordan sequence (intersection points in boundary order)
+std::vector<Point> jordan = ...;
+
+// 3. fill upper_pairs and lower_pairs
+std::vector<LineIsect> upper_pairs = ...;
+std::vector<LineIsect> lower_pairs = ...;
+
+// 4. assign depths
+assign_depths(upper_pairs);
+assign_depths(lower_pairs);
+
+// 5. build Pa and Pb
+auto [Pa, Pb] = build_pa_pb(P, jordan, upper_pairs, lower_pairs, ell_y, eps);
+
+// 6. build radial decompositions
+Arr arr_a = build_radial_decomposition(Pa, q);
+Arr arr_b = build_radial_decomposition(Pb, q);
+
+// 7. merge
+Arr radial = merge_radial_decompositions(arr_a, arr_b);
+
+*/
