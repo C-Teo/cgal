@@ -33,6 +33,8 @@ cmake -S . \
 #include <CGAL/Arr_overlay_2.h>
 #include <CGAL/Arr_default_overlay_traits.h>
 
+#include <set>
+
 typedef CGAL::Exact_predicates_exact_constructions_kernel K;
 typedef CGAL::Polygon_2<K> Polygon;
 typedef CGAL::Point_2<K> Point;
@@ -59,15 +61,19 @@ struct LineIsect
 
 void assign_depths(std::vector<LineIsect>& pairs);
 
-std::pair<Polygon, Polygon> build_pa_pb(const std::vector<LineIsect>& upper_pairs,
-                                        const std::vector<LineIsect>& lower_pairs,
-                                        const Polygon& polygon,
-                                        FT ell_y,
-                                        FT eps);
+std::tuple<Polygon, Polygon, std::set<Point>, std::set<Point>> build_pa_pb(const std::vector<LineIsect>& upper_pairs,
+                                                                           const std::vector<LineIsect>& lower_pairs,
+                                                                           const Polygon& polygon,
+                                                                           FT ell_y,
+                                                                           FT eps);
 
-void process(const CGAL::Object& obj, const Point& p_prime, Arrangement& master_arr, const Point& q, FT eps);
-void add_radial_to_master(
-    Arrangement& master_arr, const std::vector<Segment>& partition_edges, const Polygon& p, const Point& q, FT eps);
+void process(const CGAL::Object& obj, const Point& p_prime, Arrangement& radial_arr, const Point& q, FT eps);
+void add_radials(Arrangement& radial_arr,
+                 const std::vector<Segment>& partition_edges,
+                 const std::set<Point>& artificial,
+                 const Polygon& p,
+                 const Point& q,
+                 FT eps);
 
 bool DEBUGGING = true;
 
@@ -104,6 +110,8 @@ int main() {
     }
   }
 
+  // Should do this in a loop until has_vertex_on_cut is false
+  // But for testing one rotation should be enough
   if(has_vertex_on_cut) {
     // Apply a small rotation around q: sin=1/1000, cos=1000/1000
     // | cos θ   -sin θ |     | c/hw   -s/hw |
@@ -210,7 +218,7 @@ int main() {
   }
 
   // -- Create new three-way edges
-  auto [pa, pb] = build_pa_pb(upper_pairs, lower_pairs, p, q.y(), eps);
+  auto [pa, pb, pa_art, pb_art] = build_pa_pb(upper_pairs, lower_pairs, p, q.y(), eps);
 
   if(DEBUGGING) {
     std::cout << "Pa vertices:" << std::endl;
@@ -243,16 +251,21 @@ int main() {
   // Lemma2 Theradial decomposition of a simple n-vertex polygon P around
   // a query point q can be computed in Θ(n)time.
   // Utilize CGAL::Arr_vertical_decomposition or CGAL::decompose
-  Arrangement master_arr;
+  Arrangement poly_arr;
   for(auto it = p.edges_begin(); it != p.edges_end(); ++it) {
-    CGAL::insert(master_arr, *it);
+    CGAL::insert(poly_arr, *it);
   }
 
-  add_radial_to_master(master_arr, std::vector<Segment>(pa.edges_begin(), pa.edges_end()), p, q, eps);
-  add_radial_to_master(master_arr, std::vector<Segment>(pb.edges_begin(), pb.edges_end()), p, q, -eps);
+  Arrangement radial_arr;
+  add_radials(radial_arr, std::vector<Segment>(pa.edges_begin(), pa.edges_end()), pa_art, p, q, eps);
+  add_radials(radial_arr, std::vector<Segment>(pb.edges_begin(), pb.edges_end()), pb_art, p, q, -eps);
 
-  // Draw the arrangement for debugging purposes
-  CGAL::add_to_graphics_scene(master_arr, scene4);
+  CGAL::add_to_graphics_scene(poly_arr, scene4);
+
+  for(auto it = radial_arr.edges_begin(); it != radial_arr.edges_end(); ++it) {
+    scene4.add_segment(it->curve().source(), it->curve().target());
+  }
+
   CGAL::draw_graphics_scene(scene4, "K-Visibility Test Scene4");
 
   // Start the algorithm
@@ -310,14 +323,16 @@ void assign_depths(std::vector<LineIsect>& arcs) {
   }
 }
 
-std::pair<Polygon, Polygon> build_pa_pb(const std::vector<LineIsect>& upper_pairs,
-                                        const std::vector<LineIsect>& lower_pairs,
-                                        const Polygon& polygon,
-                                        FT ell_y,
-                                        FT eps) {
+std::tuple<Polygon, Polygon, std::set<Point>, std::set<Point>> build_pa_pb(const std::vector<LineIsect>& upper_pairs,
+                                                                           const std::vector<LineIsect>& lower_pairs,
+                                                                           const Polygon& polygon,
+                                                                           FT ell_y,
+                                                                           FT eps) {
 
   std::vector<Point> pa_pts;
   std::vector<Point> pb_pts;
+  std::set<Point> pa_art;
+  std::set<Point> pb_art;
 
   // Add any optimizations like a hash_map of intersection points to pairs for O(1) lookup
   // Keyed by x since all intersection points share y = ell_y
@@ -379,8 +394,17 @@ std::pair<Polygon, Polygon> build_pa_pb(const std::vector<LineIsect>& upper_pair
       auto it = upper_at.find(isect.x());
       if(it != upper_at.end()) {
         FT len = eps / pow(2, it->second->depth);
-        pb_pts.push_back(Point(isect.x(), ell_y + len));
-        pb_pts.push_back(Point(it->second->j_end.x(), ell_y + len));
+        Point isect_end(it->second->j_end.x(), ell_y);
+        Point bridge1(isect.x(), ell_y + len);
+        Point bridge2(it->second->j_end.x(), ell_y + len);
+        pb_pts.push_back(isect);
+        pb_pts.push_back(bridge1);
+        pb_pts.push_back(bridge2);
+        pb_pts.push_back(isect_end);
+        pb_art.insert(isect);
+        pb_art.insert(bridge1);
+        pb_art.insert(bridge2);
+        pb_art.insert(isect_end);
       }
     }
   }
@@ -414,13 +438,22 @@ std::pair<Polygon, Polygon> build_pa_pb(const std::vector<LineIsect>& upper_pair
       auto it = lower_at.find(isect.x());
       if(it != lower_at.end()) {
         FT len = eps / pow(2, it->second->depth);
-        pa_pts.push_back(Point(isect.x(), ell_y - len));
-        pa_pts.push_back(Point(it->second->j_end.x(), ell_y - len));
+        Point isect_end(it->second->j_end.x(), ell_y);
+        Point bridge1(isect.x(), ell_y - len);
+        Point bridge2(it->second->j_end.x(), ell_y - len);
+        pa_pts.push_back(isect);
+        pa_pts.push_back(bridge1);
+        pa_pts.push_back(bridge2);
+        pa_pts.push_back(isect_end);
+        pa_art.insert(isect);
+        pa_art.insert(bridge1);
+        pa_art.insert(bridge2);
+        pa_art.insert(isect_end);
       }
     }
   }
 
-  return {Polygon(pa_pts.begin(), pa_pts.end()), Polygon(pb_pts.begin(), pb_pts.end())};
+  return {Polygon(pa_pts.begin(), pa_pts.end()), Polygon(pb_pts.begin(), pb_pts.end()), pa_art, pb_art};
 }
 
 // FQ: Projective Transformation Mapping a Point to Infinity
@@ -458,8 +491,12 @@ Point fq_inv(const Point& p_prime, const Point& q, FT eps) {
   return Point(x + q.x(), y + q.y() - eps);
 }
 
-void add_radial_to_master(
-    Arrangement& master_arr, const std::vector<Segment>& partition_edges, const Polygon& p, const Point& q, FT eps) {
+void add_radials(Arrangement& radial_arr,
+                 const std::vector<Segment>& partition_edges,
+                 const std::set<Point>& artificial,
+                 const Polygon& p,
+                 const Point& q,
+                 FT eps) {
   Arrangement trans_arr;
 
   for(const auto& e : partition_edges) {
@@ -473,48 +510,79 @@ void add_radial_to_master(
   Decomp_list vd_list;
   CGAL::decompose(trans_arr, std::back_inserter(vd_list));
 
+  if(DEBUGGING) {
+    CGAL::Graphics_scene scene_trans;
+    CGAL::add_to_graphics_scene(trans_arr, scene_trans);
+
+    // AI helped with debug here...
+    for(const auto& entry : vd_list) {
+      Point p_prime = entry.first->point();
+      Arrangement::Halfedge_const_handle he;
+      Arrangement::Vertex_const_handle vh;
+
+      auto draw_ray = [&](const CGAL::Object& obj) {
+        if(CGAL::assign(vh, obj)) {
+          scene_trans.add_segment(p_prime, vh->point());
+        } else if(CGAL::assign(he, obj)) {
+          Point s = he->curve().source(), t = he->curve().target();
+          FT u = p_prime.x();
+          FT y_int = s.y() + (t.y() - s.y()) * (u - s.x()) / (t.x() - s.x());
+          scene_trans.add_segment(p_prime, Point(u, y_int));
+        }
+      };
+
+      draw_ray(entry.second.first);  // below
+      draw_ray(entry.second.second); // above
+    }
+
+    CGAL::draw_graphics_scene(scene_trans, "Transformed Arrangement + Decomp Rays");
+  }
+
   // 3. Process rays
   for(const auto& entry : vd_list) {
     // Each entry is:
     // - Point p' where the ray from q hits the arrangement (in transformed space)
     // - A pair of CGAL::Objects representing the feature hit above and below p'
     Point p_prime = entry.first->point();
+    Point p = fq_inv(p_prime, q, eps);
 
-    if(eps > 0) {
-      // We only care about edge down for polygon with positive epsilon
-      process(entry.second.first, p_prime, master_arr, q, eps);
-    } else {
-      // We only care about edge up for polygon with negative epsilon
-      process(entry.second.second, p_prime, master_arr, q, eps);
+    if(artificial.count(p)) {
+      std::cout << "Skipping artificial point: (" << CGAL::to_double(p.x()) << ", " << CGAL::to_double(p.y()) << ")"
+                << std::endl;
+      continue; // three-edge construction point
     }
+
+    process(entry.second.second, p_prime, radial_arr, q, eps);
+    process(entry.second.first, p_prime, radial_arr, q, eps);
   }
 }
 
-void process(const CGAL::Object& obj, const Point& p_prime, Arrangement& master_arr, const Point& q, FT eps) {
-  Point intersect_prime;
+void process(const CGAL::Object& obj, const Point& p_prime, Arrangement& radial_arr, const Point& q, FT eps) {
+  Point p = fq_inv(p_prime, q, eps);
 
   Arrangement::Halfedge_const_handle he;
   Arrangement::Vertex_const_handle vh;
 
   if(CGAL::assign(vh, obj)) { // Ray hits a vertex
 
-    intersect_prime = vh->point();
+    CGAL::insert(radial_arr, Segment(p, fq_inv(vh->point(), q, eps)));
 
   } else if(CGAL::assign(he, obj)) { // Ray hits a edge
+    // u = x-coordinate of the shooting vertex (the vertical ray)
+    // s, t = endpoints of the hit edge
     Point s = he->curve().source();
     Point t = he->curve().target();
-
     FT u = p_prime.x();
 
-    // Linear interpolation for the y-coordinate
-    FT y_int = s.y() + (t.y() - s.y()) * (u - s.x()) / (t.x() - s.x());
+    // Interpolate in transformed space
+    FT alpha = (u - s.x()) / (t.x() - s.x());
+    FT y_int = s.y() + alpha * (t.y() - s.y());
 
-    intersect_prime = Point(u, y_int);
-  } else { // Ray hit nothing
-    return;
+    // Pull back the intersection point to original space
+    CGAL::insert(radial_arr, Segment(p, fq_inv(Point(u, y_int), q, eps)));
+  } else {
+    return; // Ray hit nothing
   }
-
-  CGAL::insert(master_arr, Segment(q, fq_inv(intersect_prime, q, eps)));
 }
 
 /*
