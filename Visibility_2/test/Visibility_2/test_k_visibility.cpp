@@ -393,7 +393,7 @@ std::tuple<Polygon, Polygon, std::set<Point>, std::set<Point>> build_pa_pb(const
       // Then continue following the polygon above the line until the next intersection.
       auto it = upper_at.find(isect.x());
       if(it != upper_at.end()) {
-        FT len = eps / pow(2, it->second->depth);
+        FT len = eps / (2 * it->second->depth);
         Point isect_end(it->second->j_end.x(), ell_y);
         Point bridge1(isect.x(), ell_y + len);
         Point bridge2(it->second->j_end.x(), ell_y + len);
@@ -437,7 +437,7 @@ std::tuple<Polygon, Polygon, std::set<Point>, std::set<Point>> build_pa_pb(const
       // Then continue following the polygon below the line until the next intersection.
       auto it = lower_at.find(isect.x());
       if(it != lower_at.end()) {
-        FT len = eps / pow(2, it->second->depth);
+        FT len = eps / (2 * it->second->depth);
         Point isect_end(it->second->j_end.x(), ell_y);
         Point bridge1(isect.x(), ell_y - len);
         Point bridge2(it->second->j_end.x(), ell_y - len);
