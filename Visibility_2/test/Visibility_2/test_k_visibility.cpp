@@ -67,13 +67,12 @@ std::tuple<Polygon, Polygon, std::set<Point>, std::set<Point>> build_pa_pb(const
                                                                            FT ell_y,
                                                                            FT eps);
 
-void process(const CGAL::Object& obj, const Point& p_prime, Arrangement& radial_arr, const Point& q, FT eps);
+void process(const CGAL::Object& obj, const Point& p_prime, Arrangement& radial_arr, const Point& q);
 void add_radials(Arrangement& radial_arr,
                  const std::vector<Segment>& partition_edges,
                  const std::set<Point>& artificial,
                  const Polygon& p,
-                 const Point& q,
-                 FT eps);
+                 const Point& q);
 
 bool DEBUGGING = true;
 
@@ -257,8 +256,8 @@ int main() {
   }
 
   Arrangement radial_arr;
-  add_radials(radial_arr, std::vector<Segment>(pa.edges_begin(), pa.edges_end()), pa_art, p, q, eps);
-  add_radials(radial_arr, std::vector<Segment>(pb.edges_begin(), pb.edges_end()), pb_art, p, q, -eps);
+  add_radials(radial_arr, std::vector<Segment>(pa.edges_begin(), pa.edges_end()), pa_art, p, q);
+  add_radials(radial_arr, std::vector<Segment>(pb.edges_begin(), pb.edges_end()), pb_art, p, q);
 
   CGAL::add_to_graphics_scene(poly_arr, scene4);
 
@@ -323,6 +322,30 @@ void assign_depths(std::vector<LineIsect>& arcs) {
   }
 }
 
+// Distance from l at which the excursion of the given depth gets cut off.
+//
+// The cut has to stay inside the band of height eps around l (no vertex of P is closer than eps to
+// l, so inside that band the boundary consists only of the edges crossing l), and a nested
+// excursion has to be cut *further* from l than the excursion enclosing it: the crossing edges of
+// the nested pair reach up to their own cut, so a nested cut closer to l would be sliced by the
+// chord of the enclosing pair. The offset therefore grows with the depth instead of shrinking,
+// while staying strictly inside (0, eps).
+FT cut_offset(int depth, FT eps) {
+  return eps - eps / (2 * depth);
+}
+
+// Point where the edge (cur -> nxt) crosses the horizontal line y = target_y.
+//
+// With target_y = ell_y -/+ cut_offset(...) this places a point on the edge that approached l, at
+// exactly that offset from l, without ever crossing to the other side. Trigonometrically it is
+// stepping back offset / sin(theta) along the edge, theta being the angle the edge makes with l;
+// since l is horizontal that step reduces to a difference in y, so solving for the edge parameter
+// stays exact and the distance from the point to l is a straight y check.
+Point edge_point_at_y(const Point& cur, const Point& nxt, FT target_y) {
+  FT t = (target_y - cur.y()) / (nxt.y() - cur.y());
+  return Point(cur.x() + t * (nxt.x() - cur.x()), target_y);
+}
+
 std::tuple<Polygon, Polygon, std::set<Point>, std::set<Point>> build_pa_pb(const std::vector<LineIsect>& upper_pairs,
                                                                            const std::vector<LineIsect>& lower_pairs,
                                                                            const Polygon& polygon,
@@ -335,14 +358,19 @@ std::tuple<Polygon, Polygon, std::set<Point>, std::set<Point>> build_pa_pb(const
   std::set<Point> pb_art;
 
   // Add any optimizations like a hash_map of intersection points to pairs for O(1) lookup
-  // Keyed by x since all intersection points share y = ell_y
+  // Keyed by x since all intersection points share y = ell_y. Both endpoints of a pair map to it,
+  // so a crossing resolves to its pair whether the walk enters or leaves the excursion there.
   std::map<FT, const LineIsect*> upper_at;
-  for(const auto& pair : upper_pairs)
+  for(const auto& pair : upper_pairs) {
     upper_at[pair.j_start.x()] = &pair;
+    upper_at[pair.j_end.x()] = &pair;
+  }
 
   std::map<FT, const LineIsect*> lower_at;
-  for(const auto& pair : lower_pairs)
+  for(const auto& pair : lower_pairs) {
     lower_at[pair.j_start.x()] = &pair;
+    lower_at[pair.j_end.x()] = &pair;
+  }
 
   std::vector<Point> verts(polygon.vertices_begin(), polygon.vertices_end());
   int n = (int)verts.size();
@@ -383,30 +411,20 @@ std::tuple<Polygon, Polygon, std::set<Point>, std::set<Point>> build_pa_pb(const
       continue;
 
     // Linear interpolation along edge, find when y(t) = ell_y and plug for x
-    FT t = (ell_y - cur.y()) / (nxt.y() - cur.y());
-    Point isect(cur.x() + t * (nxt.x() - cur.x()), ell_y);
+    Point isect = edge_point_at_y(cur, nxt, ell_y);
 
-    if(!cur_above) {
-      // If we hit an intersection coming from below, use the upper_pair starting at that
-      // intersection to replace the boundary above l with the new three-edge path.
-      // Append: isect, (isect.x, ell_y + eps/(2*d)), (j_end.x, ell_y + eps/(2*d))
-      // Then continue following the polygon above the line until the next intersection.
-      auto it = upper_at.find(isect.x());
-      if(it != upper_at.end()) {
-        FT len = eps / (2 * it->second->depth);
-        Point isect_end(it->second->j_end.x(), ell_y);
-        Point bridge1(isect.x(), ell_y + len);
-        Point bridge2(it->second->j_end.x(), ell_y + len);
-        pb_pts.push_back(isect);
-        pb_pts.push_back(bridge1);
-        pb_pts.push_back(bridge2);
-        pb_pts.push_back(isect_end);
-        pb_art.insert(isect);
-        pb_art.insert(bridge1);
-        pb_art.insert(bridge2);
-        pb_art.insert(isect_end);
-      }
-    }
+    // The walk is about to leave the lower half-plane here, or to come back into it: the part of
+    // the boundary running above l is replaced by a single chord that stays below l. Stop short of
+    // the intersection, on the edge that approached it, at cut_offset(d) below l. The pair's other
+    // crossing is reached later in the same walk and stops at the same offset, so the two points
+    // become consecutive and the chord between them is the horizontal cut.
+    auto it = upper_at.find(isect.x());
+    if(it == upper_at.end())
+      continue;
+
+    Point stop = edge_point_at_y(cur, nxt, ell_y - cut_offset(it->second->depth, eps));
+    pb_pts.push_back(stop);
+    pb_art.insert(stop);
   }
 
   // For the point above (polygon_a) follow the order of the polygon and add vertices to pa_pts
@@ -427,30 +445,17 @@ std::tuple<Polygon, Polygon, std::set<Point>, std::set<Point>> build_pa_pb(const
       continue;
 
     // Linear interpolation along edge, find when y(t) = ell_y and plug for x
-    FT t = (ell_y - cur.y()) / (nxt.y() - cur.y());
-    Point isect(cur.x() + t * (nxt.x() - cur.x()), ell_y);
+    Point isect = edge_point_at_y(cur, nxt, ell_y);
 
-    if(cur_above) {
-      // If we hit an intersection coming from above, use the lower_pair starting at that
-      // intersection to replace the boundary below l with the new three-edge path.
-      // Append: isect, (isect.x, ell_y - eps/(2*d)), (j_end.x, ell_y - eps/(2*d))
-      // Then continue following the polygon below the line until the next intersection.
-      auto it = lower_at.find(isect.x());
-      if(it != lower_at.end()) {
-        FT len = eps / (2 * it->second->depth);
-        Point isect_end(it->second->j_end.x(), ell_y);
-        Point bridge1(isect.x(), ell_y - len);
-        Point bridge2(it->second->j_end.x(), ell_y - len);
-        pa_pts.push_back(isect);
-        pa_pts.push_back(bridge1);
-        pa_pts.push_back(bridge2);
-        pa_pts.push_back(isect_end);
-        pa_art.insert(isect);
-        pa_art.insert(bridge1);
-        pa_art.insert(bridge2);
-        pa_art.insert(isect_end);
-      }
-    }
+    // Mirror of the walk above: the boundary running below l is replaced by a chord that stays
+    // above l, both of its endpoints sitting on the edges of the lower pair at cut_offset(d).
+    auto it = lower_at.find(isect.x());
+    if(it == lower_at.end())
+      continue;
+
+    Point stop = edge_point_at_y(cur, nxt, ell_y + cut_offset(it->second->depth, eps));
+    pa_pts.push_back(stop);
+    pa_art.insert(stop);
   }
 
   return {Polygon(pa_pts.begin(), pa_pts.end()), Polygon(pb_pts.begin(), pb_pts.end()), pa_art, pb_art};
@@ -462,7 +467,7 @@ std::tuple<Polygon, Polygon, std::set<Point>, std::set<Point>> build_pa_pb(const
 // In homogeneous coordinates we represent a point as [x, y, w]
 // To find the 2D Cartesian result we divide by the third component: (x/w, y/w)
 
-// First we translate point + epsilon so q is (0,0) (for the lower polygon all points are below the line)
+// First we translate so q is (0,0)
 // Then we apply the projection matrix M which sends (0,1,0) to (0,0,1) (the point at infinity in the y direction)
 
 // M = | 1 0 0 |
@@ -470,38 +475,40 @@ std::tuple<Polygon, Polygon, std::set<Point>, std::set<Point>> build_pa_pb(const
 //     | 0 1 0 |
 
 // Which is simplified to (x, y) -> (x/y, 1/y) in Cartesian coordinates
-Point fq(const Point& p, const Point& q, FT eps) {
+
+// No epsilon shift is needed: Pa lies strictly above l and Pb strictly below it (their cuts stop at
+// cut_offset(d) from l), so dy never vanishes for a point of either polygon.
+Point fq(const Point& p, const Point& q) {
   // Translate
   FT dx = p.x() - q.x();
-  FT dy = p.y() - q.y() + eps;
+  FT dy = p.y() - q.y();
 
   // Project
   return Point(dx / dy, FT(1) / dy);
 }
 
 // To inverse we apply the inverse of the projection matrix M^-1 which sends (0,0,1) back to (0,1,0)
-// And then we translate back by -epsilon and the location of q
+// And then we translate back by the location of q
 // The inverse matrix M^-1 is the same as M since it is symmetric and involutory (M = M^-1)
-Point fq_inv(const Point& p_prime, const Point& q, FT eps) {
+Point fq_inv(const Point& p_prime, const Point& q) {
   // Project
   FT x = p_prime.x() / p_prime.y();
   FT y = FT(1) / p_prime.y();
 
   // Translate
-  return Point(x + q.x(), y + q.y() - eps);
+  return Point(x + q.x(), y + q.y());
 }
 
 void add_radials(Arrangement& radial_arr,
                  const std::vector<Segment>& partition_edges,
                  const std::set<Point>& artificial,
                  const Polygon& p,
-                 const Point& q,
-                 FT eps) {
+                 const Point& q) {
   Arrangement trans_arr;
 
   for(const auto& e : partition_edges) {
-    Point src = fq(e.source(), q, eps);
-    Point tgt = fq(e.target(), q, eps);
+    Point src = fq(e.source(), q);
+    Point tgt = fq(e.target(), q);
 
     CGAL::insert(trans_arr, Segment(src, tgt));
   }
@@ -544,7 +551,7 @@ void add_radials(Arrangement& radial_arr,
     // - Point p' where the ray from q hits the arrangement (in transformed space)
     // - A pair of CGAL::Objects representing the feature hit above and below p'
     Point p_prime = entry.first->point();
-    Point p = fq_inv(p_prime, q, eps);
+    Point p = fq_inv(p_prime, q);
 
     if(artificial.count(p)) {
       std::cout << "Skipping artificial point: (" << CGAL::to_double(p.x()) << ", " << CGAL::to_double(p.y()) << ")"
@@ -552,20 +559,20 @@ void add_radials(Arrangement& radial_arr,
       continue; // three-edge construction point
     }
 
-    process(entry.second.second, p_prime, radial_arr, q, eps);
-    process(entry.second.first, p_prime, radial_arr, q, eps);
+    process(entry.second.second, p_prime, radial_arr, q);
+    process(entry.second.first, p_prime, radial_arr, q);
   }
 }
 
-void process(const CGAL::Object& obj, const Point& p_prime, Arrangement& radial_arr, const Point& q, FT eps) {
-  Point p = fq_inv(p_prime, q, eps);
+void process(const CGAL::Object& obj, const Point& p_prime, Arrangement& radial_arr, const Point& q) {
+  Point p = fq_inv(p_prime, q);
 
   Arrangement::Halfedge_const_handle he;
   Arrangement::Vertex_const_handle vh;
 
   if(CGAL::assign(vh, obj)) { // Ray hits a vertex
 
-    CGAL::insert(radial_arr, Segment(p, fq_inv(vh->point(), q, eps)));
+    CGAL::insert(radial_arr, Segment(p, fq_inv(vh->point(), q)));
 
   } else if(CGAL::assign(he, obj)) { // Ray hits a edge
     // u = x-coordinate of the shooting vertex (the vertical ray)
@@ -579,7 +586,7 @@ void process(const CGAL::Object& obj, const Point& p_prime, Arrangement& radial_
     FT y_int = s.y() + alpha * (t.y() - s.y());
 
     // Pull back the intersection point to original space
-    CGAL::insert(radial_arr, Segment(p, fq_inv(Point(u, y_int), q, eps)));
+    CGAL::insert(radial_arr, Segment(p, fq_inv(Point(u, y_int), q)));
   } else {
     return; // Ray hit nothing
   }
