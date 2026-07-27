@@ -16,7 +16,14 @@
 cmake -S . \
 -B build/release/ \
 -DCMAKE_BUILD_TYPE=Release \
--DCGAL_DIR=~/projects/cgal
+-DCGAL_DIR=$HOME/Projects/cgal
+
+cmake --build build/release/ --target test_k_visibility -j8
+
+CGAL_DIR has to point at the root of this checkout: its CGALConfig.cmake globs every <package>/include
+into CGAL_INCLUDE_DIRS, which is what makes <CGAL/K_visibility_2.h> visible. Pointing it at an
+installed CGAL instead (/usr/share/cmake/CGAL, headers in /usr/include/CGAL) builds against the
+released headers, and the include above fails to resolve.
 */
 
 #include <CGAL/Arr_walk_along_line_point_location.h>
@@ -33,6 +40,8 @@ cmake -S . \
 #include <CGAL/Arr_overlay_2.h>
 #include <CGAL/Arr_default_overlay_traits.h>
 
+#include <CGAL/K_visibility_2.h>
+
 #include <set>
 
 typedef CGAL::Exact_predicates_exact_constructions_kernel K;
@@ -44,6 +53,7 @@ typedef CGAL::Aff_transformation_2<K> Transformation;
 typedef K::FT FT; // Used for CGAL exact rationals in geometric tests
 typedef CGAL::Arr_segment_traits_2<K> Traits;
 typedef CGAL::Arrangement_2<Traits> Arrangement;
+typedef CGAL::K_visibility_region_2<Arrangement> KV; // the same code, moved into the package header
 
 // This is what "Vert_decomp_list" actually is:
 typedef Arrangement::Vertex_const_handle Vertex_handle;
@@ -255,9 +265,10 @@ int main() {
     CGAL::insert(poly_arr, *it);
   }
 
+  // Driven through the template instead of the local copy below, to test the header
   Arrangement radial_arr;
-  add_radials(radial_arr, std::vector<Segment>(pa.edges_begin(), pa.edges_end()), pa_art, p, q);
-  add_radials(radial_arr, std::vector<Segment>(pb.edges_begin(), pb.edges_end()), pb_art, p, q);
+  KV::add_radials(radial_arr, std::vector<Segment>(pa.edges_begin(), pa.edges_end()), pa_art, q);
+  KV::add_radials(radial_arr, std::vector<Segment>(pb.edges_begin(), pb.edges_end()), pb_art, q);
 
   CGAL::add_to_graphics_scene(poly_arr, scene4);
 
