@@ -16,10 +16,14 @@
 
 #include <CGAL/tags.h>
 #include <CGAL/assertions.h>
+#include <CGAL/enum.h>
+#include <CGAL/number_utils.h>
+#include <CGAL/Kernel/global_functions_2.h>
 
 #include <algorithm>
 #include <cstddef>
 #include <iterator>
+#include <stdexcept>
 #include <vector>
 
 namespace CGAL {
@@ -29,6 +33,7 @@ namespace CGAL {
         typedef Arrangement_2_ Arrangement_2;
         typedef typename Arrangement_2::Geometry_traits_2 Geometry_traits_2;
 
+        typedef typename Geometry_traits_2::FT FT;
         typedef typename Geometry_traits_2::Point_2 Point_2;
         typedef typename Geometry_traits_2::Vector_2 Vector_2;
         typedef typename Geometry_traits_2::Direction_2 Direction_2;
@@ -121,6 +126,105 @@ namespace CGAL {
                 wedges_at_vertex(points, i, std::back_inserter(out[i]));
         }
 
+        enum Wedge_side {
+            WEDGE_RIGHT, // closed sector between -end and start, clockwise from A
+            WEDGE_LEFT, // closed sector between end and -start, counterclockwise from A
+            WEDGE_INTERIOR, // strictly inside A or A~
+            WEDGE_APEX // the apex itself
+        };
+
+        // Vertices are tagged as lying in AL (left region) or AR (right region)
+        Wedge_side side_of_wedge(const Wedge &wedge, const Point_2 &p) const {
+            const Vector_2 v(wedge.apex, p);
+
+            if (v == NULL_VECTOR)
+                return WEDGE_APEX;
+
+            const Orientation o_start = orientation(wedge.start.direction.vector(), v);
+            const Orientation o_end = orientation(wedge.end.direction.vector(), v);
+
+            if (o_start != LEFT_TURN && o_end != LEFT_TURN) return WEDGE_RIGHT;
+            if (o_start != RIGHT_TURN && o_end != RIGHT_TURN) return WEDGE_LEFT;
+            return WEDGE_INTERIOR; // left of one line and right of the other: inside A or A~
+        }
+
+        struct Clipping_edge {
+            Point_2 source; // endpoint on the right of the wedge
+            Point_2 target; // endpoint on the left of the wedge
+            std::size_t edge; // index i of the polygon edge (p_i, p_{i+1})
+            FT param_num;
+            FT param_den;
+
+            Clipping_edge() : edge(0), param_num(0), param_den(1) {
+            }
+
+            Clipping_edge(const Point_2 &s, const Point_2 &t, const std::size_t e,
+                          const FT &num, const FT &den)
+                : source(s), target(t), edge(e), param_num(num), param_den(den) {
+            }
+
+            Sign signed_distance_sign() const { return CGAL::sign(param_num); }
+        };
+
+        // E(A), with `list[i - 1]` denoting E(A)_i.
+        typedef std::vector<Clipping_edge> Clipping_list;
+
+        template<class PointRange>
+        Clipping_list create_clipping_list(const PointRange &polygon, const Wedge &wedge) const {
+            const std::vector<Point_2> points(std::begin(polygon), std::end(polygon));
+            const std::size_t n = points.size();
+
+            CGAL_precondition(n > 2);
+            CGAL_precondition(wedge.apex_vertex < n);
+            CGAL_precondition(points[wedge.apex_vertex] == wedge.apex);
+
+            const std::size_t apex = wedge.apex_vertex;
+            const std::size_t prev = (apex + n - 1) % n; // s-
+            const std::size_t next = (apex + 1) % n; // s+
+
+            const Vector_2 axis = wedge_axis(wedge);
+
+            // Map every vertex i to its relative location with respect to the wedge
+            std::vector<Wedge_side> sides(n);
+            for (std::size_t i = 0; i < n; ++i)
+                sides[i] = side_of_wedge(wedge, points[i]);
+
+            CGAL_precondition(sides[prev] != WEDGE_APEX && sides[next] != WEDGE_APEX);
+
+            Clipping_list list;
+
+            // Always append (s-,s) and conditionally append (s,s+)
+            append_clipping_edge(points, sides, prev, apex, wedge.apex, axis, list);
+            if (sides[prev] == sides[next])
+                append_clipping_edge(points, sides, apex, next, wedge.apex, axis, list);
+
+            // Build the rest of the clipping edges
+            for (std::size_t i = 0; i < n; ++i) {
+                const std::size_t j = (i + 1) % n;
+                if (i == apex || j == apex)
+                    continue; // incident to the apex, already handled above
+
+                CGAL_precondition_msg(sides[i] != WEDGE_INTERIOR && sides[j] != WEDGE_INTERIOR,
+                                      "A vertex lies strictly inside the wedge: the wedge was not "
+                                      "built from the lines through its apex and the vertices of "
+                                      "this polygon.");
+
+                append_clipping_edge(points, sides, i, j, wedge.apex, axis, list);
+            }
+
+            // Sort E(A) by their signed distance relative to the apex s
+            std::stable_sort(list.begin(), list.end(), less_clipping_edge_comp());
+
+            return list;
+        }
+
+        template<class PointRange, class OutputIterator>
+        OutputIterator create_clipping_list(const PointRange &polygon, const Wedge &wedge,
+                                            OutputIterator oi) const {
+            const Clipping_list list = create_clipping_list(polygon, wedge);
+            return std::copy(list.begin(), list.end(), oi);
+        }
+
     private:
         struct less_wedge_ray_comp {
             bool operator()(const Wedge_ray &r1, const Wedge_ray &r2) const { return r1.direction < r2.direction; }
@@ -129,6 +233,59 @@ namespace CGAL {
         struct equal_wedge_ray_comp {
             bool operator()(const Wedge_ray &r1, const Wedge_ray &r2) const { return r1.direction == r2.direction; }
         };
+
+        struct less_clipping_edge_comp {
+            bool operator()(const Clipping_edge &e1, const Clipping_edge &e2) const {
+                return e1.param_num * e2.param_den < e2.param_num * e1.param_den;
+            }
+        };
+
+        Vector_2 wedge_axis(const Wedge &wedge) const {
+            const Vector_2 start = wedge.start.direction.vector();
+            const Vector_2 end = wedge.end.direction.vector();
+
+            CGAL_precondition_msg(orientation(start, end) == LEFT_TURN,
+                                  "Degenerate wedge: its bounding directions span a half-plane.");
+
+            return start + end;
+        }
+
+        void append_clipping_edge(const std::vector<Point_2> &points,
+                                  const std::vector<Wedge_side> &sides,
+                                  const std::size_t a, const std::size_t b,
+                                  const Point_2 &apex, const Vector_2 &axis,
+                                  Clipping_list &list) const {
+            const bool a_right = (sides[a] == WEDGE_RIGHT || sides[a] == WEDGE_APEX);
+            const bool a_left = (sides[a] == WEDGE_LEFT || sides[a] == WEDGE_APEX);
+            const bool b_right = (sides[b] == WEDGE_RIGHT || sides[b] == WEDGE_APEX);
+            const bool b_left = (sides[b] == WEDGE_LEFT || sides[b] == WEDGE_APEX);
+
+            if (a_right && b_left)
+                list.push_back(make_clipping_edge(points[a], points[b], a, apex, axis));
+            else if (a_left && b_right)
+                list.push_back(make_clipping_edge(points[b], points[a], a, apex, axis));
+        }
+
+        // Should never need to run `make_clipping_edge` unless we are going to append it
+        Clipping_edge make_clipping_edge(const Point_2 &source, const Point_2 &target,
+                                         const std::size_t edge, const Point_2 &apex,
+                                         const Vector_2 &axis) const {
+            const Vector_2 d(source, target);
+
+            const Orientation side = orientation(d, axis);
+            CGAL_assertion(side != COLLINEAR);
+
+            // Cross Product
+            FT num = determinant(d, Vector_2(apex, source));
+            FT den = determinant(d, axis);
+
+            if (side == RIGHT_TURN) {
+                num = -num;
+                den = -den;
+            }
+
+            return Clipping_edge(source, target, edge, num, den);
+        }
     };
 }
 
