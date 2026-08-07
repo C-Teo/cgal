@@ -77,6 +77,7 @@ namespace CGAL {
                                         std::size_t apex_index,
                                         OutputIterator oi) const {
             const std::vector<Point_2> points(std::begin(polygon), std::end(polygon));
+
             CGAL_precondition(apex_index < points.size());
 
             const Point_2 &apex = points[apex_index];
@@ -231,6 +232,31 @@ namespace CGAL {
                                             OutputIterator oi) const {
             const Clipping_list list = create_clipping_list(polygon, wedge);
             return std::copy(list.begin(), list.end(), oi);
+        }
+
+        // True iff p lies strictly inside wedge A (not including A~).
+        bool is_in_wedge(const Wedge &wedge, const Point_2 &p) const {
+            const Vector_2 v(wedge.apex, p);
+
+            if (v == NULL_VECTOR) return true;
+
+            return orientation(wedge.start.direction.vector(), v) == LEFT_TURN
+                   && orientation(wedge.end.direction.vector(), v) == RIGHT_TURN;
+        }
+
+        bool is_k_clipped(const Wedge &wedge, const Clipping_list &list,
+                          const Point_2 &x, const std::size_t k) const {
+            if (!is_in_wedge(wedge, x))
+                return false;
+
+            const std::size_t index = k + 1; // E(A)_i is list[i - 1]
+
+            if (index >= list.size())
+                return false; // no E(A)_{k+2} to clip against
+
+            const Orientation o = orientation(list[index].source, list[index].target, x);
+
+            return (k % 2 == 0) ? (o == RIGHT_TURN) : (o != LEFT_TURN);
         }
 
     private:
