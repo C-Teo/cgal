@@ -134,6 +134,7 @@ namespace CGAL {
         };
 
         // Vertices are tagged as lying in AL (left region) or AR (right region)
+        // Tests a point against wedge.start.direction and wedge.end.direction (the two lines through the apex)
         Wedge_side side_of_wedge(const Wedge &wedge, const Point_2 &p) const {
             const Vector_2 v(wedge.apex, p);
 
@@ -143,6 +144,8 @@ namespace CGAL {
             const Orientation o_start = orientation(wedge.start.direction.vector(), v);
             const Orientation o_end = orientation(wedge.end.direction.vector(), v);
 
+            // The tests are negated so that a point collinear with a bounding
+            // ray (i.e. a vertex defining it) is assigned to the sector it bounds, not to the interior.
             if (o_start != LEFT_TURN && o_end != LEFT_TURN) return WEDGE_RIGHT;
             if (o_start != RIGHT_TURN && o_end != RIGHT_TURN) return WEDGE_LEFT;
             return WEDGE_INTERIOR; // left of one line and right of the other: inside A or A~
@@ -152,6 +155,8 @@ namespace CGAL {
             Point_2 source; // endpoint on the right of the wedge
             Point_2 target; // endpoint on the left of the wedge
             std::size_t edge; // index i of the polygon edge (p_i, p_{i+1})
+
+            // the parameter at which the edge's supporting line crosses the wedge axis
             FT param_num;
             FT param_den;
 
@@ -171,6 +176,8 @@ namespace CGAL {
 
         template<class PointRange>
         Clipping_list create_clipping_list(const PointRange &polygon, const Wedge &wedge) const {
+            Clipping_list list;
+
             const std::vector<Point_2> points(std::begin(polygon), std::end(polygon));
             const std::size_t n = points.size();
 
@@ -182,6 +189,7 @@ namespace CGAL {
             const std::size_t prev = (apex + n - 1) % n; // s-
             const std::size_t next = (apex + 1) % n; // s+
 
+            // Used to order the elements of E(A) according to their signed distance from s
             const Vector_2 axis = wedge_axis(wedge);
 
             // Map every vertex i to its relative location with respect to the wedge
@@ -191,8 +199,6 @@ namespace CGAL {
 
             CGAL_precondition(sides[prev] != WEDGE_APEX && sides[next] != WEDGE_APEX);
 
-            Clipping_list list;
-
             // Always append (s-,s) and conditionally append (s,s+)
             append_clipping_edge(points, sides, prev, apex, wedge.apex, axis, list);
             if (sides[prev] == sides[next])
@@ -201,6 +207,7 @@ namespace CGAL {
             // Build the rest of the clipping edges
             for (std::size_t i = 0; i < n; ++i) {
                 const std::size_t j = (i + 1) % n;
+
                 if (i == apex || j == apex)
                     continue; // incident to the apex, already handled above
 
@@ -209,6 +216,7 @@ namespace CGAL {
                                       "built from the lines through its apex and the vertices of "
                                       "this polygon.");
 
+                // Check if we should append the edge (if it clips), and if so append to output list
                 append_clipping_edge(points, sides, i, j, wedge.apex, axis, list);
             }
 
@@ -240,6 +248,8 @@ namespace CGAL {
             }
         };
 
+        // A ray strictly inside A, used as a ruler: every edge of E(A) crosses it exactly once,
+        // and the crossing position (`param_num`/`param_den`) orders E(A) by distance from the apex.
         Vector_2 wedge_axis(const Wedge &wedge) const {
             const Vector_2 start = wedge.start.direction.vector();
             const Vector_2 end = wedge.end.direction.vector();
@@ -272,17 +282,11 @@ namespace CGAL {
                                          const Vector_2 &axis) const {
             const Vector_2 d(source, target);
 
-            const Orientation side = orientation(d, axis);
-            CGAL_assertion(side != COLLINEAR);
+            const FT num = determinant(Vector_2(apex, source), d);
+            const FT den = determinant(axis, d);
 
-            // Cross Product
-            FT num = determinant(d, Vector_2(apex, source));
-            FT den = determinant(d, axis);
-
-            if (side == RIGHT_TURN) {
-                num = -num;
-                den = -den;
-            }
+            CGAL_precondition_msg(orientation(d, axis) == RIGHT_TURN,
+                                  "Clipping edge does not run from the right sector to the left one.");
 
             return Clipping_edge(source, target, edge, num, den);
         }
